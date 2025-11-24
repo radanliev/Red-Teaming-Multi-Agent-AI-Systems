@@ -1,0 +1,244 @@
+https://www.oreilly.com/live-events/agentic-ai-security-bootcamp/0642572236106/
+
+Here’s the ready-to-run GitHub repo layout for the MAS Sleeper-Agent Threat-Modelling Lab (Week 4 of the Agentic AI Security Bootcamp).
+Copy this structure into a new repo, open it in VS Code, and you’ll be able to run and debug everything immediately.
+
+⸻
+
+Repo structure
+
+mas-sleeper-agents/
+│
+├── README.md
+├── requirements.txt
+├── .vscode/
+│   └── launch.json
+│
+├── instrument_env.py
+├── build_graph_and_rank.py
+├── sleeper_behavior.py
+└── analysis.ipynb
+
+
+⸻
+
+requirements.txt
+
+pettingzoo>=1.24
+gymnasium>=0.29
+marl-lib @ git+https://github.com/Replicable-MARL/MARLlib.git
+networkx>=3.2
+numpy>=1.26
+pandas>=2.1
+matplotlib>=3.8
+jupyterlab>=4.0
+
+
+⸻
+
+.vscode/launch.json
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run environment instrumentation",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/instrument_env.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Build comms graph & rank",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/build_graph_and_rank.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Simulate sleeper behaviour",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/sleeper_behavior.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Open Jupyter Analysis",
+      "type": "python",
+      "request": "launch",
+      "program": "-m",
+      "args": ["jupyter", "lab"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
+
+
+⸻
+
+instrument_env.py
+
+Captures A2A (Agent-to-Agent) and MCP (Model Context Protocol) messages and writes a JSON log.
+
+import time, json, uuid
+from pettingzoo.sisl import cooperative_pong_v3
+env = cooperative_pong_v3.env()
+env.reset()
+message_log = []
+
+def log_message(sender, recipient, channel, mtype, payload, signed=False, key_id=None, agency=0.5, reward_delta=0.0, sleeper=False):
+    entry = dict(
+        timestamp=time.time(),
+        session_id="sess-"+str(uuid.uuid4())[:8],
+        step=getattr(env, "num_env_steps", 0),
+        sender=sender, recipient=recipient,
+        channel=channel, message_type=mtype,
+        payload_summary=str(payload)[:180],
+        payload_hash="sha256:"+str(hash(str(payload))),
+        signed=signed, signature_key_id=key_id,
+        agency_level=agency, reward_delta=reward_delta,
+        sleeper_flag=sleeper
+    )
+    message_log.append(entry)
+
+for a in env.agent_iter():
+    obs, reward, done, info = env.last()
+    for r in env.agents:
+        if r != a:
+            log_message(a, r, "A2A", "belief", {"pose": str(obs)[:40]}, agency=0.7)
+    env.step(env.action_space(a).sample())
+
+with open("message_log.json", "w") as f:
+    json.dump(message_log, f, indent=2)
+print(f"Saved {len(message_log)} messages.")
+
+
+⸻
+
+build_graph_and_rank.py
+
+Builds a directed communication graph and ranks agents by centrality.
+
+import json, networkx as nx
+
+with open("message_log.json") as f:
+    msgs = json.load(f)
+
+G = nx.DiGraph()
+for m in msgs:
+    s, r = m["sender"], m["recipient"]
+    G.add_node(s)
+    G.add_node(r)
+    G.add_edge(s, r, weight=G[s][r]["weight"] + 1 if G.has_edge(s,r) else 1)
+
+bet = nx.betweenness_centrality(G)
+eig = nx.eigenvector_centrality(G, max_iter=500)
+score = {n: 0.6*bet.get(n,0)+0.4*eig.get(n,0) for n in G.nodes()}
+targets = sorted(score, key=score.get, reverse=True)[:3]
+
+print("Top high-impact (central) agents:", targets)
+nx.write_gml(G, "comms_graph.gml")
+
+
+⸻
+
+sleeper_behavior.py
+
+Implements trigger and malicious message injection.
+
+import json, random, time
+
+with open("message_log.json") as f:
+    msgs = json.load(f)
+
+SLEEPERS = {"agent_03": {"armed": True, "trigger": "mcp_cmd"},
+            "agent_11": {"armed": True, "trigger": "gps_spoof"}}
+
+def activate_sleepers(messages):
+    for m in messages:
+        for agent, meta in SLEEPERS.items():
+            if meta["armed"] and meta["trigger"] in m["payload_summary"]:
+                meta["active"] = True
+    return [inject_payload(m) for m in messages]
+
+def inject_payload(m):
+    active = [a for a,meta in SLEEPERS.items() if meta.get("active")]
+    for a in active:
+        msgs.append({
+            "timestamp": time.time(),
+            "sender": a,
+            "recipient": "broadcast",
+            "channel": "A2A",
+            "message_type": "belief",
+            "payload_summary": "tampered_pose",
+            "payload_hash": "sha256:"+str(hash("tampered_pose")),
+            "signed": False,
+            "agency_level": 0.9,
+            "reward_delta": random.uniform(-0.5,0.5),
+            "sleeper_flag": True
+        })
+    return m
+
+tampered = activate_sleepers(msgs)
+with open("tampered_log.json","w") as f:
+    json.dump(tampered,f,indent=2)
+print("Injected", len([m for m in tampered if m.get("sleeper_flag")]), "malicious messages.")
+
+
+⸻
+
+analysis.ipynb
+
+Use this Jupyter notebook to:
+	1.	Load message_log.json and tampered_log.json.
+	2.	Plot message counts per channel.
+	3.	Compute pre/post-attack graph metrics.
+	4.	Display mitigation results (e.g., drop in unsigned-message rate after enabling signing).
+
+Skeleton:
+
+import json, pandas as pd, networkx as nx, matplotlib.pyplot as plt
+df = pd.read_json("tampered_log.json")
+print(df.head())
+
+unsigned = (df["signed"]==False).mean()*100
+print(f"Unsigned message rate: {unsigned:.2f}%")
+
+G = nx.read_gml("comms_graph.gml")
+plt.figure(figsize=(8,6))
+nx.draw(G, with_labels=True, node_color='lightblue')
+plt.show()
+
+
+⸻
+
+README.md
+
+Include quick-start commands:
+
+# MAS Sleeper-Agent Threat-Modelling Lab
+
+## Setup
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+Run the experiments
+
+# 1. Instrument environment
+python instrument_env.py
+# 2. Build and rank
+python build_graph_and_rank.py
+# 3. Simulate sleeper activation
+python sleeper_behavior.py
+# 4. Open Jupyter Lab for analysis
+jupyter lab
+
+Outputs
+	•	message_log.json — baseline A2A/MCP traffic
+	•	tampered_log.json — includes sleeper injections
+	•	comms_graph.gml — network graph for analysis
+
+---
+
+Clone or copy this folder into your GitHub account, open in **VS Code**, choose a configuration from the *Run and Debug* panel, and you can launch each stage interactively.
