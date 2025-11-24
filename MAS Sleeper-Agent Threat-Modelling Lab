@@ -3,6 +3,45 @@ https://www.oreilly.com/live-events/agentic-ai-security-bootcamp/0642572236106/
 Here’s the ready-to-run GitHub repo layout for the MAS Sleeper-Agent Threat-Modelling Lab (Week 4 of the Agentic AI Security Bootcamp).
 Copy this structure into a new repo, open it in VS Code, and you’ll be able to run and debug everything immediately.
 
+Before you run this code, make sure that you use local containerised sandbox using Docker + kind (Kubernetes in Docker) + Python virtualenv
+
+Secure setup (commands)
+
+# install docker (Ubuntu example)
+sudo apt update && sudo apt install -y ca-certificates curl gnupg lsb-release
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io
+
+# install kind (Kubernetes in Docker)
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64 && chmod +x ./kind && sudo mv ./kind /usr/local/bin/
+
+# create a cluster with limited resources (adjust as needed)
+cat <<EOF > kind-config.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30000
+    hostPort: 30000
+    protocol: TCP
+EOF
+
+kind create cluster --config kind-config.yaml --name mas-lab
+
+# create Python venv and install deps
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt   # use repo's requirements.txt
+
+Network security: block egress if you want a fully air-gapped lab:
+
+# example: use host firewall to block outbound except package manager / registry
+sudo iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP   # replace with refined rules
+
 ⸻
 
 Repo structure
