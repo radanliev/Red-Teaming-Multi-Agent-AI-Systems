@@ -1,0 +1,29 @@
+import networkx as nx, numpy as np, matplotlib.pyplot as plt
+from pettingzoo.mpe import simple_spread_v3
+env = simple_spread_v3.env(N=5, local_ratio=0.5)
+env.reset()
+
+# baseline communication graph
+G = nx.complete_graph(env.num_agents)
+nx.set_edge_attributes(G, 0, "error_rate")
+
+malicious = 2  # agent index
+for step in range(200):
+    for a in env.agent_iter():
+        obs, reward, done, info = env.last()
+        if a == env.agents[malicious]:
+            # malicious: inject noise into position and reward
+            obs = obs + np.random.normal(0, 0.5, obs.shape)
+            reward = reward * -0.3
+        env.step(env.action_space(a).sample())
+
+        # log message interference rate
+        for peer in env.agents:
+            if peer != a and np.random.rand() < 0.05:
+                G[a][peer]["error_rate"] += 1
+# visualise
+weights = [G[u][v]["error_rate"] for u,v in G.edges()]
+nx.draw(G, with_labels=True, width=[w/10 for w in weights], edge_color="red")
+plt.title("Failure Propagation via Message Interference")
+plt.show()
+
