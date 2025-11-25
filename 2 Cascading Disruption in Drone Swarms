@@ -1,3 +1,5 @@
+#Objective: simulate one malicious agent that perturbs collective learning and visualise failure propagation.
+
 import networkx as nx, numpy as np, matplotlib.pyplot as plt
 from pettingzoo.mpe import simple_spread_v3
 env = simple_spread_v3.env(N=5, local_ratio=0.5)
