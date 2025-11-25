@@ -1,0 +1,389 @@
+⸻
+
+requirements.txt
+
+pettingzoo>=1.24
+gymnasium>=0.29
+numpy>=1.24
+torch>=2.0.0
+networkx>=3.2
+pandas>=2.0
+matplotlib>=3.5
+tqdm>=4.65
+
+
+⸻
+
+.vscode/launch.json
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run single injection",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/run_injection.py",
+      "args": ["--adversary-agent", "2", "--adversary-policy", "policies/adversarial_agent_2.pt", "--seed", "0"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Run stress test",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/stress_test.py",
+      "args": ["--episodes", "20", "--adversary-agent", "2", "--adversary-policy", "policies/adversarial_agent_2.pt"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
+
+
+⸻
+
+utils.py
+
+# utils.py
+import torch
+import os
+import json
+import numpy as np
+
+def save_policy(state_dict, path):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save(state_dict, path)
+
+def load_policy(path, map_location=None):
+    return torch.load(path, map_location=map_location)
+
+def seed_everything(seed):
+    import random, os
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+    except Exception:
+        pass
+
+def write_metrics_csv(rows, path):
+    import csv, os
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    keys = list(rows[0].keys()) if rows else []
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+
+⸻
+
+baseline_policy.py
+
+# baseline_policy.py
+import torch
+import os
+import numpy as np
+from utils import save_policy, seed_everything
+
+seed_everything(42)
+
+out_dir = "policies"
+os.makedirs(out_dir, exist_ok=True)
+
+for i in range(5):
+    p = {"dummy": np.random.randn(10,5).tolist()}
+    path = os.path.join(out_dir, f"baseline_agent_{i}.pt")
+    torch.save(p, path)
+
+print("Saved placeholder baseline policies to policies/*.pt")
+
+
+⸻
+
+perturb_policy.py
+
+# perturb_policy.py
+import argparse
+import torch
+import numpy as np
+from utils import seed_everything
+
+seed_everything(123)
+
+def perturb_state(obj, sigma=0.1):
+    if isinstance(obj, dict):
+        out = {}
+        for k,v in obj.items():
+            arr = np.array(v)
+            out[k] = (arr + np.random.normal(0, sigma, arr.shape)).astype(arr.dtype)
+        return out
+    elif isinstance(obj, torch.Tensor):
+        return obj + torch.randn_like(obj) * sigma
+    else:
+        try:
+            for k in obj:
+                if isinstance(obj[k], torch.Tensor):
+                    obj[k] = obj[k] + torch.randn_like(obj[k]) * sigma
+            return obj
+        except Exception as e:
+            raise RuntimeError("Unsupported policy object for perturbation") from e
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("src", help="source policy path")
+    parser.add_argument("dst", help="destination path for adversarial policy")
+    parser.add_argument("--noise", type=float, default=0.2, help="stddev of Gaussian noise")
+    args = parser.parse_args()
+
+    obj = torch.load(args.src, map_location="cpu")
+    pert = perturb_state(obj, sigma=args.noise)
+    torch.save(pert, args.dst)
+    print(f"Saved adversarial policy to {args.dst}")
+
+if __name__ == "__main__":
+    main()
+
+
+⸻
+
+run_injection.py
+
+# run_injection.py
+import argparse, json, os, time
+import numpy as np
+import torch
+from pettingzoo.mpe import simple_spread_v3
+from utils import seed_everything, write_metrics_csv
+
+def ensure_policy_shape(policy_obj, obs_dim, act_dim):
+    if isinstance(policy_obj, dict) and "dummy" in policy_obj:
+        import torch
+        model = torch.nn.Linear(obs_dim, act_dim)
+        torch.nn.init.normal_(model.weight, mean=0.0, std=0.01)
+        torch.nn.init.constant_(model.bias, 0.0)
+        return model.state_dict()
+    elif isinstance(policy_obj, dict):
+        sd = {}
+        for k,v in policy_obj.items():
+            sd[k] = torch.tensor(np.array(v))
+        return sd
+    else:
+        return policy_obj
+
+def run_episode(adversary_agent=None, adversary_policy_path=None, seed=0):
+    seed_everything(seed)
+    env = simple_spread_v3.parallel_env(N=5, local_ratio=0.5)
+    obs = env.reset(seed=seed)
+    agents = env.agents[:]
+
+    policies = {}
+    for idx, a in enumerate(agents):
+        path = f"policies/baseline_agent_{idx}.pt"
+        if os.path.exists(path):
+            policy_obj = torch.load(path, map_location="cpu")
+            sample_obs = obs[a]
+            act_shape = env.action_space(a).shape
+            obs_dim = int(np.product(sample_obs.shape))
+            act_dim = int(np.product(act_shape))
+            state = ensure_policy_shape(policy_obj, obs_dim, act_dim)
+            model = torch.nn.Linear(obs_dim, act_dim)
+            try:
+                if isinstance(state, dict) and 'weight' in state and 'bias' in state:
+                    model.weight.data = torch.tensor(state['weight'])
+                    model.bias.data = torch.tensor(state['bias'])
+            except Exception:
+                pass
+            policies[a] = model
+        else:
+            sample_obs = obs[a]
+            act_shape = env.action_space(a).shape
+            obs_dim = int(np.product(sample_obs.shape))
+            act_dim = int(np.product(act_shape))
+            model = torch.nn.Linear(obs_dim, act_dim)
+            policies[a] = model
+
+    if adversary_agent is not None and adversary_policy_path:
+        adv_obj = torch.load(adversary_policy_path, map_location="cpu")
+        sample_obs = obs[agents[adversary_agent]]
+        act_shape = env.action_space(agents[adversary_agent]).shape
+        obs_dim = int(np.product(sample_obs.shape))
+        act_dim = int(np.product(act_shape))
+        state = ensure_policy_shape(adv_obj, obs_dim, act_dim)
+        adv_model = torch.nn.Linear(obs_dim, act_dim)
+        try:
+            if isinstance(state, dict) and 'weight' in state and 'bias' in state:
+                adv_model.weight.data = torch.tensor(state['weight'])
+                adv_model.bias.data = torch.tensor(state['bias'])
+        except Exception:
+            pass
+        policies[agents[adversary_agent]] = adv_model
+
+    step = 0
+    rows = []
+    while True:
+        actions = {}
+        for a in agents:
+            o = obs[a]
+            o_flat = np.array(o).astype(np.float32).ravel()
+            with torch.no_grad():
+                t = torch.from_numpy(o_flat)
+                act = policies[a](t).numpy()
+            actions[a] = act
+        obs, rewards, terminations, truncations, infos = env.step(actions)
+        rows.append({
+            "step": step,
+            "avg_reward": float(np.mean([rewards.get(a,0.0) for a in agents])),
+            "max_reward": float(np.max([rewards.get(a,0.0) for a in agents])),
+            "adversary_active": int(adversary_agent is not None)
+        })
+        step += 1
+        if all([terminations.get(a, False) or truncations.get(a, False) for a in agents]) or step > 500:
+            break
+
+    env.close()
+    return rows
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--adversary-agent", type=int, default=None)
+    parser.add_argument("--adversary-policy", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--out", type=str, default="episode_metrics.csv")
+    args = parser.parse_args()
+
+    rows = run_episode(adversary_agent=args.adversary_agent, adversary_policy_path=args.adversary_policy, seed=args.seed)
+    write_metrics_csv(rows, args.out)
+    print(f"Wrote episode metrics to {args.out}")
+
+if __name__ == "__main__":
+    main()
+
+⸻
+
+stress_test.py
+
+# stress_test.py
+import argparse, os
+import numpy as np
+import pandas as pd
+from run_injection import run_episode
+from utils import write_metrics_csv, seed_everything
+
+def episode_summary(rows):
+    avg_rewards = [r["avg_reward"] for r in rows]
+    return {
+        "episode_len": len(rows),
+        "mean_avg_reward": float(np.mean(avg_rewards)),
+        "min_avg_reward": float(np.min(avg_rewards)),
+        "max_avg_reward": float(np.max(avg_rewards)),
+    }
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--episodes", type=int, default=30)
+    parser.add_argument("--adversary-agent", type=int, default=2)
+    parser.add_argument("--adversary-policy", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--out", type=str, default="stress_results.csv")
+    args = parser.parse_args()
+
+    baseline_summaries = []
+    injected_summaries = []
+    for i in range(args.episodes):
+        s = args.seed + i
+        baseline_rows = run_episode(adversary_agent=None, adversary_policy_path=None, seed=s)
+        injected_rows = run_episode(adversary_agent=args.adversary_agent, adversary_policy_path=args.adversary_policy, seed=s)
+        baseline_summaries.append(episode_summary(baseline_rows))
+        injected_summaries.append(episode_summary(injected_rows))
+        print(f"Episode {i+1}/{args.episodes} done.")
+
+    df_base = pd.DataFrame(baseline_summaries); df_base["condition"]="baseline"
+    df_inj = pd.DataFrame(injected_summaries); df_inj["condition"]="injected"
+    df = pd.concat([df_base, df_inj], ignore_index=True)
+    df.to_csv(args.out, index=False)
+    print(f"Wrote stress results to {args.out}")
+
+if __name__ == "__main__":
+    main()
+
+⸻
+
+analysis.ipynb
+
+Create a notebook with this content (cells below). You can paste into Jupyter or VS Code notebook.
+
+Cell 1 (Markdown)
+
+# Analysis notebook
+Load `stress_results.csv` and produce boxplots comparing baseline vs injected conditions.
+
+Cell 2 (Code)
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_csv('stress_results.csv')
+print(df.groupby('condition').describe())
+
+plt.figure(figsize=(6,4))
+df.boxplot(column='mean_avg_reward', by='condition')
+plt.title('Mean Average Reward by Condition')
+plt.suptitle('')
+plt.ylabel('Mean Average Reward')
+plt.show()
+
+⸻
+
+README.md
+
+# Session 3 — Red Teaming MAS Practical: Policy Tampering and Stress Tests
+
+This repository contains a self-contained lab for **red-teaming multi-agent systems (MAS)** by injecting altered (tampered) policies and running ensemble stress tests.
+
+**Course slides (local reference):** /mnt/data/27OCT2025_Agentic AI Security Bootcamp.pptx
+
+## Quick start
+
+1. Create virtual environment and install dependencies:
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+
+	2.	Create baseline placeholder policies:
+
+python baseline_policy.py
+
+	3.	Generate adversarial policy (perturb baseline):
+
+python perturb_policy.py policies/baseline_agent_2.pt policies/adversarial_agent_2.pt --noise 0.25
+
+	4.	Run a single episode with injected adversary:
+
+python run_injection.py --adversary-agent 2 --adversary-policy policies/adversarial_agent_2.pt --seed 0 --out episode_injected.csv
+
+	5.	Run ensemble stress test (baseline vs injected):
+
+python stress_test.py --episodes 30 --adversary-agent 2 --adversary-policy policies/adversarial_agent_2.pt --seed 0 --out stress_results.csv
+
+	6.	Analyse results:
+
+	•	Open analysis.ipynb in Jupyter or VS Code and inspect stress_results.csv.
+
+Files
+	•	baseline_policy.py — create placeholder baseline policies.
+	•	perturb_policy.py — perturb saved policy file to create adversarial policy.
+	•	run_injection.py — run one episode with optional adversary injection.
+	•	stress_test.py — run N episodes baseline vs injected and aggregate metrics.
+	•	utils.py — utility helpers for saving/loading policies and metrics.
+	•	analysis.ipynb — notebook to visualise results.
+
+Safety & Ethics
+	•	Run only in isolated, sandboxed environments.
+	•	Do not connect to physical devices or production services.
+	•	Delete adversarial policy files after experiments and follow responsible disclosure if findings are escalated.
+
+---
