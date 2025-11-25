@@ -1,31 +1,173 @@
 #Objective: simulate one malicious agent that perturbs collective learning and visualise failure propagation.
 
-import networkx as nx, numpy as np, matplotlib.pyplot as plt
+#How to run in VS Code
+requirements.txt (use these versions)
+pettingzoo>=1.24
+gymnasium>=0.29
+networkx>=3.2
+numpy>=1.26
+matplotlib>=3.8
+
+# 1.Create a Python virtual environment and install requirements:
+python3 -m venv .venv
+# Unix/macOS
+. .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. session2_exercise.py
+"""
+Session 2 Practical: Simulate malicious agent affecting collective learning
+and visualise failure propagation with NetworkX and PettingZoo (parallel API).
+
+Usage:
+  python session2_exercise.py
+
+Outputs:
+  - metrics.csv         (per-step aggregated metrics)
+  - comms_graph.png     (visualisation of interference weights)
+  - comms_graph.gml     (graph file for deeper analysis)
+"""
+
+import csv
+import time
+import random
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+
+# PettingZoo parallel environment
 from pettingzoo.mpe import simple_spread_v3
-env = simple_spread_v3.env(N=5, local_ratio=0.5)
-env.reset()
 
-# baseline communication graph
-G = nx.complete_graph(env.num_agents)
-nx.set_edge_attributes(G, 0, "error_rate")
+# ---------- CONFIG ----------
+NUM_AGENTS = 5
+STEPS = 400
+MALICIOUS_AGENT_INDEX = 2          # index of agent to act maliciously
+SLEEPER_ACTIVATION_STEP = 150      # step at which sleeper "activates"
+INTERFERENCE_PROB = 0.05           # base probability of message interference per edge per step
+MALICIOUS_INJECTION_RATE = 0.25    # extra interference probability when malicious active
+SEED = 42
+# ----------------------------
 
-malicious = 2  # agent index
-for step in range(200):
-    for a in env.agent_iter():
-        obs, reward, done, info = env.last()
-        if a == env.agents[malicious]:
-            # malicious: inject noise into position and reward
-            obs = obs + np.random.normal(0, 0.5, obs.shape)
-            reward = reward * -0.3
-        env.step(env.action_space(a).sample())
+random.seed(SEED)
+np.random.seed(SEED)
 
-        # log message interference rate
-        for peer in env.agents:
-            if peer != a and np.random.rand() < 0.05:
-                G[a][peer]["error_rate"] += 1
-# visualise
-weights = [G[u][v]["error_rate"] for u,v in G.edges()]
-nx.draw(G, with_labels=True, width=[w/10 for w in weights], edge_color="red")
-plt.title("Failure Propagation via Message Interference")
-plt.show()
+env = simple_spread_v3.parallel_env(N=NUM_AGENTS, local_ratio=0.5)
+env.reset(seed=SEED)
 
+agents = env.agents[:]  # ordered list of agent ids
+malicious_agent = agents[MALICIOUS_AGENT_INDEX]
+
+# Communication graph: directed, edges count interference events
+G = nx.DiGraph()
+for a in agents:
+    G.add_node(a)
+for a in agents:
+    for b in agents:
+        if a != b:
+            G.add_edge(a, b, weight=0)
+
+# Metrics logging
+metrics_rows = []
+cumulative_rewards = {a: 0.0 for a in agents}
+malicious_active = False
+
+print(f"Agents: {agents}")
+print(f"Malicious agent: {malicious_agent}; sleeper activation at step {SLEEPER_ACTIVATION_STEP}")
+
+# Main loop
+obs = env.reset()
+for step in range(STEPS):
+    actions = {}
+    # Choose actions for each agent (random policy baseline)
+    for a in agents:
+        # sample discrete actions from continuous action space: use env.action_space(a).sample()
+        actions[a] = env.action_space(a).sample()
+
+    # If malicious is active, override its action to a disruptive pattern
+    if step >= SLEEPER_ACTIVATION_STEP:
+        malicious_active = True
+        # make malicious produce noisy action (high-variance)
+        actions[malicious_agent] = np.random.uniform(-1.0, 1.0, size=env.action_space(malicious_agent).shape)
+
+    # Step environment (parallel API)
+    obs, rewards, terminations, truncations, infos = env.step(actions)
+
+    # Simulate message interference events and reward manipulation propagation
+    # Interference probability increases from malicious agent to others when active
+    for a in agents:
+        for b in agents:
+            if a == b:
+                continue
+            # base interference
+            p = INTERFERENCE_PROB
+            if malicious_active and a == malicious_agent:
+                p += MALICIOUS_INJECTION_RATE
+            if random.random() < p:
+                # register an interference event on edge a->b
+                G[a][b]['weight'] += 1
+                # Simulate penalty in perceived reward for recipient (belief poisoning effect)
+                # reduce recipient reward slightly in our metrics (does not change env internals)
+                rewards[b] = rewards.get(b, 0.0) - 0.1
+
+    # accumulate reward metrics
+    for a in agents:
+        cumulative_rewards[a] += rewards.get(a, 0.0)
+
+    # aggregate metrics for this step
+    avg_reward = np.mean([rewards.get(a, 0.0) for a in agents])
+    max_interference = max((G[u][v]['weight'] for u,v in G.edges()), default=0)
+    metrics_rows.append({
+        "step": step,
+        "malicious_active": int(malicious_active),
+        "avg_reward": float(avg_reward),
+        "max_interference_weight": int(max_interference)
+    })
+
+    # small progress indicator
+    if step % 50 == 0:
+        print(f"Step {step}: avg_reward={avg_reward:.3f}, malicious_active={malicious_active}")
+
+# End main loop
+env.close()
+print("Simulation finished. Writing outputs...")
+
+# Write metrics CSV
+with open("metrics.csv", "w", newline="") as csvfile:
+    fieldnames = ["step", "malicious_active", "avg_reward", "max_interference_weight"]
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in metrics_rows:
+        writer.writerow(r)
+
+# Write comms graph file
+nx.write_gml(G, "comms_graph.gml")
+
+# Draw the graph, show edge weights (scaled)
+plt.figure(figsize=(8, 6))
+pos = nx.spring_layout(G, seed=SEED)
+edge_weights = [G[u][v]["weight"] for u, v in G.edges()]
+# scale widths for visibility
+max_w = max(edge_weights) if edge_weights else 1
+widths = [1 + (5.0 * w / max_w) for w in edge_weights]
+nx.draw_networkx_nodes(G, pos, node_size=500, node_color="lightblue")
+nx.draw_networkx_labels(G, pos)
+nx.draw_networkx_edges(G, pos, width=widths, edge_color="red", arrowsize=12)
+# annotate edges with integer interference counts
+edge_labels = {(u, v): G[u][v]["weight"] for u, v in G.edges() if G[u][v]["weight"] > 0}
+nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color="darkred")
+plt.title("Communication Interference Weights (red edges scaled by interference)")
+plt.axis("off")
+plt.tight_layout()
+plt.savefig("comms_graph.png", dpi=200)
+plt.close()
+print("Saved comms_graph.png and comms_graph.gml and metrics.csv")
+
+# Print a short summary
+bet = nx.betweenness_centrality(G)
+top3 = sorted(bet.items(), key=lambda x: x[1], reverse=True)[:3]
+print("Top-3 betweenness centrality (candidates for containment):")
+for n, v in top3:
+    print(f"  {n}: {v:.4f}")
+
+# 3.	Run the script in VS Code integrated terminal:
+python session2_exercise.py
