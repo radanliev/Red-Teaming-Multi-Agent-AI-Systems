@@ -1,11 +1,11 @@
 https://www.oreilly.com/live-events/agentic-ai-security-bootcamp/0642572236106/
 
-Here’s the ready-to-run GitHub repo layout for the MAS Sleeper-Agent Threat-Modelling Lab (Week 4 of the Agentic AI Security Bootcamp).
+#Here’s the ready-to-run GitHub repo layout for the MAS Sleeper-Agent Threat-Modelling Lab (Week 4 of the Agentic AI Security Bootcamp).
 Copy this structure into a new repo, open it in VS Code, and you’ll be able to run and debug everything immediately.
 
-Before you run this code, make sure that you use local containerised sandbox using Docker + kind (Kubernetes in Docker) + Python virtualenv
+#Before you run this code, make sure that you use local containerised sandbox using Docker + kind (Kubernetes in Docker) + Python virtualenv
 
-Secure setup (commands)
+#Secure setup (commands)
 
 # install docker (Ubuntu example)
 sudo apt update && sudo apt install -y ca-certificates curl gnupg lsb-release
@@ -41,6 +41,122 @@ Network security: block egress if you want a fully air-gapped lab:
 
 # example: use host firewall to block outbound except package manager / registry
 sudo iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP   # replace with refined rules
+
+----
+#Logging schema (use JSON per event)
+#Each message / observation in the log should include these fields so you can map A2A, MCP, AGNTCY:
+
+ 1. {
+ 2.   "timestamp": "2025-10-27T12:34:56.789Z",
+ 3.   "session_id": "sess-abc-001",
+ 4.   "step": 123,
+ 5.   "sender": "agent_07",
+ 6.   "recipient": "agent_12",          // or "broadcast"
+ 7.   "channel": "A2A"| "MCP" | "TOOL", // A2A = Agent-to-Agent, MCP = Model Context Protocol, TOOL = external tool call
+ 8.   "mcp_context_id": "ctx-445",      // only for MCP messages
+ 9.   "message_type": "belief_update" | "plan" | "vote" | "sensor", 
+10.   "payload_summary": "pose:...,score:...", 
+11.   "payload_hash": "sha256:...",
+12.   "signed": true|false,
+13.   "signature_key_id": "key-23",
+14.   "agency_level": 0.8,              // AGNTCY: numeric level of autonomy/privilege (0..1)
+15.   "reward_delta": 0.0,              // if message includes reward info
+16.   "sleeper_flag": false             // true only if message originated from a sleeper (for internal trace)
+17. }
+18.  
+
+----
+#Instrument PettingZoo and produce message_log
+
+ 1. instrument_env.py
+ 2. # pip install pettingzoo gymnasium networkx numpy pandas
+ 3. import time, json, uuid
+ 4. from pettingzoo.sisl import cooperative_pong_v3  # example environment
+ 5. env = cooperative_pong_v3.env()
+ 6. env.reset()
+ 7. message_log=[]
+ 8.  
+ 9. def log_message(sender, recipient, channel, mtype, payload, signed=False, key_id=None, agency=0.5, reward_delta=0.0, sleeper=False):
+10.     entry = {
+11.         "timestamp": time.time(),
+12.         "session_id": "sess-"+str(uuid.uuid4())[:8],
+13.         "step": env.num_env_steps if hasattr(env,'num_env_steps') else 0,
+14.         "sender": sender, "recipient": recipient,
+15.         "channel": channel, "message_type": mtype,
+16.         "payload_summary": str(payload)[:200],
+17.         "payload_hash": "sha256:"+str(hash(str(payload))),
+18.         "signed": signed, "signature_key_id": key_id,
+19.         "agency_level": agency, "reward_delta": reward_delta,
+20.         "sleeper_flag": sleeper
+21.     }
+22.     message_log.append(entry)
+23.  
+24. # Example loop: agents exchange belief updates
+25. for a in env.agent_iter():
+26.     obs, reward, done, info = env.last()
+27.     # Simulate an A2A belief broadcast
+28.     sender = a
+29.     recipients = env.agents.copy()
+30.     for r in recipients:
+31.         if r!=sender:
+32.             log_message(sender, r, "A2A", "belief", {"pose":obs}, signed=False, key_id=None, agency=0.7)
+33.     action = env.action_space(a).sample()
+34.     env.step(action)
+35. # Save log
+36. with open("message_log.json","w") as f:
+37.     json.dump(message_log, f, indent=2)
+38.  
+
+-----
+#Build the comms graph and identify targets
+
+build_graph_and_rank.py
+ 1. import json, networkx as nx
+ 2. with open("message_log.json") as f:
+ 3.     msgs = json.load(f)
+ 4.  
+ 5. G = nx.DiGraph()
+ 6. for m in msgs:
+ 7.     s = m['sender']; r = m['recipient']
+ 8.     if not G.has_node(s): G.add_node(s)
+ 9.     if not G.has_node(r): G.add_node(r)
+10.     if G.has_edge(s,r):
+11.         G[s][r]['weight'] += 1
+12.     else:
+13.         G.add_edge(s,r, weight=1, signed_count= 1 if m['signed'] else 0)
+14. # centrality
+15. bet = nx.betweenness_centrality(G)
+16. eigen = nx.eigenvector_centrality(G, max_iter=500)
+17. # score by combined rank
+18. score = {n: bet.get(n,0)*0.6 + eigen.get(n,0)*0.4 for n in G.nodes()}
+19. targets = sorted(score, key=score.get, reverse=True)[:5]
+20. print("Top target agents for sleeper activation:", targets)
+21.  
+--  
+#Simulate sleeper agents (activation triggers)
+
+ 1. SLEEPERS = {"agent_03": {"armed":True, "trigger":"gps_spoof"}, "agent_11": {"armed":True, "trigger":"mcp_cmd"}}
+ 2.  
+ 3. def check_trigger(msg):
+ 4.     # triggers: message patterns, timing, or external command
+ 5.     if msg['channel']=="MCP" and "activate_all" in msg['payload_summary']:
+ 6.         return True
+ 7.     if "gps" in msg['payload_summary'] and "spoof_marker" in msg['payload_summary']:
+ 8.         return True
+ 9.     return False
+10.  
+11. # in message processing loop:
+12. for m in incoming_messages:
+13.     # if sleeper receives trigger, flip its armed->active and change behaviour
+14.     if m['recipient'] in SLEEPERS and SLEEPERS[m['recipient']]['armed']:
+15.         if check_trigger(m):
+16.             SLEEPERS[m['recipient']]['active']=True
+17.     # if sleeper active, modify outgoing messages
+18.     for s in SLEEPERS:
+19.         if SLEEPERS[s].get('active'):
+20.             # override normal message payloads or inject reward shaping
+21.             log_message(s, "broadcast", "A2A", "belief", {"pose":"tampered"}, signed=False, agency=0.9, sleeper=True)
+22.  
 
 ⸻
 
