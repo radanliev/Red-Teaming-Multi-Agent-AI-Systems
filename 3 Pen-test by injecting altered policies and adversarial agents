@@ -1,1 +1,222 @@
+# 🧠 Week 4 – Session 3: Red Teaming Methodologies & MAS Penetration Testing
+
+## 🎯 Objective
+Simulate a **penetration test** on a multi-agent system (MAS) by **injecting altered (tampered) policies** and observing how the network behaves under stress.  
+You’ll perform:
+1. **Baseline run** – cooperative agents performing normally.  
+2. **Adversarial run** – one agent replaced with a tampered policy.  
+3. **Stress test** – repeat experiments with different seeds and analyse robustness.  
+
+This lab demonstrates **model-supply-chain attacks**, **adversarial reinforcement learning**, and how **distributed learning breaks down** under coordinated perturbations.
+
+---
+
+## 🧩 Environment Setup
+
+### 🔧 Prerequisites
+- Python 3.10+  
+- VS Code or any IDE  
+- No GPU required  
+- Linux/macOS/Windows (Docker optional)  
+
+### 🪄 Installation
+```bash
+git clone <your-repo-url>
+cd session3_redteam_lab
+python3 -m venv .venv
+# Linux/macOS
+. .venv/bin/activate
+# Windows (PowerShell)
+.venv\Scripts\Activate
+pip install -r requirements.txt
+
+🧱 Requirements
+
+requirements.txt
+
+pettingzoo>=1.24
+gymnasium>=0.29
+numpy>=1.24
+torch>=2.0.0
+networkx>=3.2
+pandas>=2.0
+matplotlib>=3.5
+tqdm>=4.65
+
+
+⸻
+
+🧠 Concept Overview
+	•	Baseline policies → clean cooperative models.
+	•	Adversarial policy → same architecture but weight tampering simulates registry compromise.
+	•	Injection → replace one agent’s model during runtime.
+	•	Stress test → run multiple episodes to measure systemic degradation.
+
+Metrics include:
+	•	Mean team reward
+	•	Reward variance
+	•	Task completion rate
+	•	Recovery time
+
+⸻
+
+📂 Repository Layout
+
+session3_redteam_lab/
+├── baseline_policy.py        # creates baseline policies
+├── perturb_policy.py         # generates adversarial policy
+├── run_injection.py          # runs MAS with injected policy
+├── stress_test.py            # ensemble tests and metrics
+├── analysis.ipynb            # notebook for plotting results
+├── utils.py                  # helper utilities
+├── requirements.txt
+└── README.md
+
+
+⸻
+
+🚀 Step-by-Step Guide
+
+1️⃣ Create Baseline Policies
+
+Generate simple cooperative policies and store them under /policies.
+
+python baseline_policy.py
+
+These act as “known good” models.
+
+⸻
+
+2️⃣ Create an Adversarial Policy
+
+Perturb one agent’s weights to simulate a tampered model in your supply chain.
+
+python perturb_policy.py policies/baseline_agent_2.pt policies/adversarial_agent_2.pt --noise 0.25
+
+This adds Gaussian noise (0.25σ) to the policy’s parameters.
+
+⸻
+
+3️⃣ Run an Injected Episode
+
+Run the environment where Agent 2 is replaced with the adversarial model.
+
+python run_injection.py --adversary-agent 2 --adversary-policy policies/adversarial_agent_2.pt --seed 0 --out episode_injected.csv
+
+Outputs:
+	•	episode_injected.csv → step-level rewards
+	•	Logs showing average reward fluctuations
+
+⸻
+
+4️⃣ Run Ensemble Stress Test
+
+Execute 30 episodes (baseline vs adversarial) and collect robustness metrics.
+
+python stress_test.py --episodes 30 --adversary-agent 2 --adversary-policy policies/adversarial_agent_2.pt --seed 0 --out stress_results.csv
+
+Outputs:
+	•	stress_results.csv → aggregated metrics for baseline vs injected runs
+	•	Console logs showing per-episode summaries
+
+⸻
+
+5️⃣ Analyse Results
+
+Open analysis.ipynb in Jupyter or VS Code.
+
+Example code:
+
+import pandas as pd, matplotlib.pyplot as plt
+df = pd.read_csv("stress_results.csv")
+df.boxplot(column="mean_avg_reward", by="condition", grid=False)
+plt.title("MAS Robustness under Adversarial Injection")
+plt.suptitle("")
+plt.ylabel("Mean Average Reward")
+plt.show()
+
+Interpretation:
+	•	Box height → variability across episodes
+	•	Drop in average reward → loss of coordination
+	•	Wider spread → instability introduced by adversary
+
+⸻
+
+🧪 Mitigation Experiments
+
+Try these defences and rerun the stress test:
+
+Mitigation	Implementation	Expected Effect
+Reward Clipping	Limit reward to [-1, 1] in run_injection.py.	Reduces reward-exploitation impact.
+Majority Consensus	Drop messages when <50% neighbours agree (simulated).	Stops single-agent belief poisoning.
+Message Verification	Add signed=True flag to messages; ignore unsigned.	Prevents agent impersonation.
+
+Run again:
+
+python stress_test.py --episodes 30 --adversary-agent 2 --adversary-policy policies/adversarial_agent_2.pt
+
+Compare new results with stress_results.csv baseline.
+
+⸻
+
+📊 Expected Output
+	•	Baseline condition: stable mean rewards (flat distribution).
+	•	Injected condition: reward drop of 25–50%, increased variance.
+	•	Mitigated condition: partial recovery, reduced variance.
+
+Example summary (typical CPU run):
+
+Condition	Mean Reward	Std Dev	Relative Loss
+Baseline	0.72	0.08	—
+Injected	0.41	0.23	43% ↓
+Mitigated	0.63	0.12	12% ↓
+
+
+⸻
+
+🧩 Ethical and Safety Considerations
+	•	Run only in isolated environments (no live systems).
+	•	Use for educational red-team simulations, not production testing.
+	•	Always disclose findings under responsible-AI guidelines.
+	•	Delete adversarial files (adversarial_agent_*.pt) after completion.
+
+⸻
+
+📘 Deliverables for Participants
+	1.	stress_results.csv — your quantitative comparison file.
+	2.	Plots of baseline vs injected mean rewards.
+	3.	Short (1–2 paragraph) report answering:
+	•	How severe was the degradation?
+	•	Which mitigation helped most?
+	•	How does this map to real-world MAS architectures (e.g., drones, trading agents, chat-based coordinators)?
+
+⸻
+
+💡 Optional Extension
+	•	Replace linear policies with 2-layer MLPs.
+	•	Implement digital-signature verification before loading any policy.
+	•	Integrate with a mock SLSA (Supply-chain Levels for Software Artifacts) attestation gate to reject unsigned models.
+
+⸻
+
+📎 Reference
+
+This lab corresponds to Session 3, Week 4 of the Agentic AI Security Bootcamp.
+Slides: /mnt/data/27OCT2025_Agentic AI Security Bootcamp.pptx
+Frameworks: MITRE ATLAS￼ · STRIDE￼
+Environment: PettingZoo￼ · Gymnasium￼
+
+⸻
+
+✅ Outcome
+
+By completing this lab, you will:
+	•	Understand how adversarial policies disrupt cooperation.
+	•	Measure MAS resilience quantitatively.
+	•	Apply red-teaming workflows to AI infrastructures.
+	•	Propose effective policy-level mitigations and governance strategies.
+
+⸻
+
+
 
